@@ -1,11 +1,16 @@
 #include "OpdsBookBrowserActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <OpdsStream.h>
 #include <WiFi.h>
 
+#include <algorithm>
+
+#include "CrossPointState.h"
+#include "GutenbergCatalog.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -90,11 +95,38 @@ void OpdsBookBrowserActivity::loop() {
 
   if (state == BrowserState::DOWNLOADING) return;
 
+  if (state == BrowserState::DETAIL) {
+    if (detailIndex < 0 || detailIndex >= static_cast<int>(entries.size())) {
+      state = BrowserState::BROWSING;
+      requestUpdate();
+      return;
+    }
+    const auto& book = entries[detailIndex];
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (isInLibrary(book)) {
+        openBook(libraryPathFor(book));  // reboots into the reader
+      } else {
+        downloadBook(book);
+      }
+    } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+      state = BrowserState::BROWSING;
+      requestUpdate();
+    }
+    return;
+  }
+
   if (state == BrowserState::BROWSING) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
       if (!entries.empty()) {
         const auto& entry = entries[selectorIndex];
-        entry.type == OpdsEntryType::BOOK ? downloadBook(entry) : navigateToEntry(entry);
+        if (entry.type != OpdsEntryType::BOOK) {
+          navigateToEntry(entry);
+        } else if (gutenberg) {
+          // Show the book detail (title/author/description) before downloading.
+          showDetail(selectorIndex);
+        } else {
+          downloadBook(entry);
+        }
       }
     } else if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
       navigateBack();
@@ -158,6 +190,11 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
                           downloadTotal);
     }
     renderer.displayBuffer();
+    return;
+  }
+
+  if (state == BrowserState::DETAIL) {
+    renderDetail();
     return;
   }
 
@@ -269,8 +306,10 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
   // Build full download URL relative to the current feed, not the root server URL
   const std::string feedUrl = UrlUtils::buildUrl(server.url, currentPath);
   std::string downloadUrl = UrlUtils::buildUrl(feedUrl, book.href);
-  std::string filename =
-      "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+  // Gutenberg books carry the ebook id in the filename (gutenberg-<id>-<slug>)
+  // so the library de-dup is a plain directory check; other servers keep the
+  // author-title convention.
+  std::string filename = libraryPathFor(book);
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
   const auto result = HttpDownloader::downloadToFile(
@@ -284,7 +323,9 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
 
   if (result == HttpDownloader::OK) {
     clearBookCache(filename);
-    state = BrowserState::BROWSING;
+    // Gutenberg downloads come from the detail screen; return there so it now
+    // offers "Read" (F6/F7). Other servers return to the list as before.
+    state = gutenberg ? BrowserState::DETAIL : BrowserState::BROWSING;
   } else {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_DOWNLOAD_FAILED);
@@ -342,6 +383,103 @@ void OpdsBookBrowserActivity::performSearch(const std::string& query) {
   statusMessage = tr(STR_LOADING);
   requestUpdate(true);
   fetchFeed(url);
+}
+
+std::string OpdsBookBrowserActivity::libraryPathFor(const OpdsEntry& book) const {
+  if (gutenberg) {
+    const std::string gpath = GutenbergCatalog::bookFilename(book.id, book.title);
+    if (!gpath.empty()) return gpath;
+  }
+  // Fallback: generic author-title naming (matches the non-Gutenberg path).
+  return "/" + StringUtils::sanitizeFilename((book.author.empty() ? "" : book.author + " - ") + book.title) + ".epub";
+}
+
+bool OpdsBookBrowserActivity::isInLibrary(const OpdsEntry& book) const {
+  const std::string path = libraryPathFor(book);
+  return Storage.exists(path.c_str());
+}
+
+void OpdsBookBrowserActivity::showDetail(const int index) {
+  detailIndex = index;
+  state = BrowserState::DETAIL;
+  requestUpdate();
+}
+
+void OpdsBookBrowserActivity::openBook(const std::string& path) {
+  // Persist the target and reboot straight into the reader. The reboot tears
+  // down WiFi/TLS and defrags the heap — the same hand-off other network
+  // activities use (silentRestartToReader routes to APP_STATE.openEpubPath).
+  APP_STATE.openEpubPath = path;
+  APP_STATE.saveToFile();
+  silentRestartToReader();
+}
+
+void OpdsBookBrowserActivity::renderDetail() {
+  const int pageWidth = renderer.getScreenWidth();
+  const int pageHeight = renderer.getScreenHeight();
+
+  if (detailIndex < 0 || detailIndex >= static_cast<int>(entries.size())) {
+    renderer.displayBuffer();
+    return;
+  }
+  const OpdsEntry& book = entries[detailIndex];
+  const bool owned = isInLibrary(book);
+  const int maxW = pageWidth - 40;
+
+  // Greedy word-wrap: draw up to maxLines lines of text, return the y past them.
+  auto drawWrapped = [&](const int fontId, const EpdFontFamily::Style style, const std::string& text, int y,
+                         const int maxLines, const int lineH) -> int {
+    int used = 0;
+    std::string line;
+    size_t start = 0;
+    while (start < text.size() && used < maxLines) {
+      while (start < text.size() && text[start] == ' ') ++start;
+      size_t end = text.find(' ', start);
+      if (end == std::string::npos) end = text.size();
+      const std::string word = text.substr(start, end - start);
+      start = end;
+      if (word.empty()) continue;
+      const std::string candidate = line.empty() ? word : line + " " + word;
+      if (line.empty() || renderer.getTextWidth(fontId, candidate.c_str(), style) <= maxW) {
+        line = candidate;
+      } else {
+        renderer.drawText(fontId, 20, y, line.c_str(), true, style);
+        y += lineH;
+        ++used;
+        line = word;
+      }
+    }
+    if (used < maxLines && !line.empty()) {
+      renderer.drawText(fontId, 20, y, line.c_str(), true, style);
+      y += lineH;
+    }
+    return y;
+  };
+
+  int y = 60;
+  y = drawWrapped(UI_12_FONT_ID, EpdFontFamily::BOLD, book.title, y, 3, 26);
+  if (!book.author.empty()) {
+    y += 4;
+    y = drawWrapped(UI_10_FONT_ID, EpdFontFamily::ITALIC, book.author, y, 2, 22);
+  }
+  if (owned) {
+    y += 6;
+    renderer.drawText(UI_10_FONT_ID, 20, y, tr(STR_IN_LIBRARY), true, EpdFontFamily::BOLD);
+    y += 24;
+  }
+  y += 10;
+
+  // Description fills the space left above the button hints.
+  const int hintsReserve = 40;
+  const int summaryLines = std::max(0, (pageHeight - hintsReserve - y) / 22);
+  if (summaryLines > 0) {
+    const std::string& desc = book.summary.empty() ? std::string(tr(STR_NO_DESCRIPTION)) : book.summary;
+    drawWrapped(UI_10_FONT_ID, EpdFontFamily::REGULAR, desc, y, summaryLines, 22);
+  }
+
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), owned ? tr(STR_READ) : tr(STR_DOWNLOAD), "", "");
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer();
 }
 
 void OpdsBookBrowserActivity::checkAndConnectWifi() {

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "GutenbergCatalog.h"
 #include "OpdsServerStore.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
@@ -193,6 +194,13 @@ void ActivityManager::goToBrowser() {
   } else {
     replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, true));
   }
+}
+
+void ActivityManager::goToGutenberg() {
+  // Built-in, always-available catalog: no server picker, no configuration.
+  // The gutenberg flag turns on id-based de-dup and the book detail screen.
+  replaceActivity(std::make_unique<OpdsBookBrowserActivity>(renderer, mappedInput, GutenbergCatalog::makeServer(),
+                                                            /*gutenberg=*/true));
 }
 
 void ActivityManager::goToReader(std::string path) {

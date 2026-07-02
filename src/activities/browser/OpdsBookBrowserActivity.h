@@ -15,10 +15,14 @@
  */
 class OpdsBookBrowserActivity final : public Activity {
  public:
-  enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DOWNLOADING, ERROR, SEARCH_INPUT };
+  enum class BrowserState { CHECK_WIFI, WIFI_SELECTION, LOADING, BROWSING, DETAIL, DOWNLOADING, ERROR, SEARCH_INPUT };
 
-  explicit OpdsBookBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, OpdsServer server)
-      : Activity("OpdsBookBrowser", renderer, mappedInput), buttonNavigator(), server(std::move(server)) {}
+  explicit OpdsBookBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, OpdsServer server,
+                                   bool gutenberg = false)
+      : Activity("OpdsBookBrowser", renderer, mappedInput),
+        buttonNavigator(),
+        server(std::move(server)),
+        gutenberg(gutenberg) {}
 
   void onEnter() override;
   void onExit() override;
@@ -39,8 +43,10 @@ class OpdsBookBrowserActivity final : public Activity {
   std::string statusMessage;
   size_t downloadProgress = 0;
   size_t downloadTotal = 0;
+  int detailIndex = 0;  // entries[] index shown on the DETAIL screen
 
-  OpdsServer server;  // Copied at construction — safe even if the store changes during browsing
+  OpdsServer server;       // Copied at construction — safe even if the store changes during browsing
+  bool gutenberg = false;  // Built-in Project Gutenberg catalog: id de-dup + detail screen
 
   void checkAndConnectWifi();
   void launchWifiSelection();
@@ -48,8 +54,16 @@ class OpdsBookBrowserActivity final : public Activity {
   void fetchFeed(const std::string& path);
   void navigateToEntry(const OpdsEntry& entry);
   void navigateBack();
+  void showDetail(int index);
   void downloadBook(const OpdsEntry& book);
+  void openBook(const std::string& path);
   void launchSearch();
   void performSearch(const std::string& query);
   bool preventAutoSleep() override { return true; }
+
+  // Local library path a book would occupy once downloaded, and whether it is
+  // already there (de-dup by Gutenberg id, per PRD F7).
+  std::string libraryPathFor(const OpdsEntry& book) const;
+  bool isInLibrary(const OpdsEntry& book) const;
+  void renderDetail();
 };

@@ -3,6 +3,7 @@
 #include <Logging.h>
 #include <XmlParserUtils.h>
 
+#include <algorithm>
 #include <cstring>
 
 OpdsParser::OpdsParser() {
@@ -69,7 +70,7 @@ void OpdsParser::clear() {
   prevPageUrl.clear();
   currentEntry = OpdsEntry{};
   currentText.clear();
-  inEntry = inTitle = inAuthor = inAuthorName = inId = false;
+  inEntry = inTitle = inAuthor = inAuthorName = inId = inSummary = false;
 }
 
 std::vector<OpdsEntry> OpdsParser::getBooks() const {
@@ -149,6 +150,14 @@ void XMLCALL OpdsParser::startElement(void* userData, const XML_Char* name, cons
   } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
     self->inId = true;
     self->currentText.clear();
+  } else if (strcmp(name, "summary") == 0 || strstr(name, ":summary") != nullptr) {
+    // <summary> is preferred over <content> for the description.
+    self->inSummary = true;
+    self->currentText.clear();
+  } else if (self->currentEntry.summary.empty() &&
+             (strcmp(name, "content") == 0 || strstr(name, ":content") != nullptr)) {
+    self->inSummary = true;
+    self->currentText.clear();
   }
 }
 
@@ -172,6 +181,10 @@ void XMLCALL OpdsParser::endElement(void* userData, const XML_Char* name) {
     } else if (strcmp(name, "id") == 0 || strstr(name, ":id") != nullptr) {
       if (self->inId) self->currentEntry.id = self->currentText;
       self->inId = false;
+    } else if (strcmp(name, "summary") == 0 || strstr(name, ":summary") != nullptr || strcmp(name, "content") == 0 ||
+               strstr(name, ":content") != nullptr) {
+      if (self->inSummary) self->currentEntry.summary = self->currentText;
+      self->inSummary = false;
     }
   }
 }
@@ -180,5 +193,13 @@ void XMLCALL OpdsParser::characterData(void* userData, const XML_Char* s, const 
   auto* self = static_cast<OpdsParser*>(userData);
   if (self->inTitle || self->inAuthorName || self->inId) {
     self->currentText.append(s, len);
+  } else if (self->inSummary) {
+    // Cap the description so a long <content> block can't grow the entry vector
+    // without bound (RAM is the wall). A couple hundred chars is plenty for the
+    // detail screen.
+    constexpr size_t kMaxSummary = 320;
+    if (self->currentText.size() < kMaxSummary) {
+      self->currentText.append(s, std::min(static_cast<size_t>(len), kMaxSummary - self->currentText.size()));
+    }
   }
 }
