@@ -13,6 +13,11 @@
  * All Gutenberg endpoints live here as a single config point (per TRD-gutenberg
  * §5) so switching to a mirror later is a one-line edit. Downloads are never
  * hand-built: we follow the acquisition <link> the feed returns.
+ *
+ * This file is also the extension seam for other DRM-free catalogs: a second
+ * OPDS source (e.g. Standard Ebooks) is a copy of this namespace + one home-menu
+ * entry, no engine changes. See docs/gutenberg.md "Future sources" for the
+ * candidate list — none are implemented yet.
  */
 namespace GutenbergCatalog {
 
