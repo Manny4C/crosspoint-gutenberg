@@ -43,7 +43,8 @@ class OpdsBookBrowserActivity final : public Activity {
   std::string statusMessage;
   size_t downloadProgress = 0;
   size_t downloadTotal = 0;
-  int detailIndex = 0;  // entries[] index shown on the DETAIL screen
+  int detailIndex = 0;       // entries[] index shown on the DETAIL screen
+  bool detailOwned = false;  // cached: is the DETAIL book already on SD (computed off the render path)
 
   OpdsServer server;       // Copied at construction — safe even if the store changes during browsing
   bool gutenberg = false;  // Built-in Project Gutenberg catalog: id de-dup + detail screen

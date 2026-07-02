@@ -103,7 +103,7 @@ void OpdsBookBrowserActivity::loop() {
     }
     const auto& book = entries[detailIndex];
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (isInLibrary(book)) {
+      if (detailOwned) {
         openBook(libraryPathFor(book));  // reboots into the reader
       } else {
         downloadBook(book);
@@ -325,7 +325,12 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
     clearBookCache(filename);
     // Gutenberg downloads come from the detail screen; return there so it now
     // offers "Read" (F6/F7). Other servers return to the list as before.
-    state = gutenberg ? BrowserState::DETAIL : BrowserState::BROWSING;
+    if (gutenberg) {
+      detailOwned = true;  // the file is now on SD
+      state = BrowserState::DETAIL;
+    } else {
+      state = BrowserState::BROWSING;
+    }
   } else {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_DOWNLOAD_FAILED);
@@ -401,6 +406,8 @@ bool OpdsBookBrowserActivity::isInLibrary(const OpdsEntry& book) const {
 
 void OpdsBookBrowserActivity::showDetail(const int index) {
   detailIndex = index;
+  // Compute ownership once here (loop task), so the render task never touches SD.
+  detailOwned = (index >= 0 && index < static_cast<int>(entries.size())) && isInLibrary(entries[index]);
   state = BrowserState::DETAIL;
   requestUpdate();
 }
@@ -423,7 +430,7 @@ void OpdsBookBrowserActivity::renderDetail() {
     return;
   }
   const OpdsEntry& book = entries[detailIndex];
-  const bool owned = isInLibrary(book);
+  const bool owned = detailOwned;  // cached in showDetail() — no SD access on the render task
   const int maxW = pageWidth - 40;
 
   // Greedy word-wrap: draw up to maxLines lines of text, return the y past them.
